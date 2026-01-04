@@ -5,7 +5,6 @@ from datetime import date
 import numpy as np
 import pandas as pd
 import pytest
-import squigglepy as sq
 
 from metr import METRFit, fit_metr
 
@@ -14,242 +13,204 @@ from metr import METRFit, fit_metr
 
 @pytest.fixture
 def sample_df():
-    """Synthetic METR data with known parameters."""
-    # True params: intercept=0, slope=0.1 (log scale)
-    # So horizon = exp(0.1 * t), doubling time = ln(2)/0.1 ≈ 6.93 months
-    t_months = [0, 6, 12, 18, 24]
-    horizons = [np.exp(0.1 * t) for t in t_months]
+    """Synthetic METR data with known parameters.
 
-    return pd.DataFrame(
-        {
-            "model": [f"model_{i}" for i in range(len(t_months))],
-            "release_date": [
-                date(2020, 1 + t // 12 * 12, 1 + (t % 12)) for t in [0, 6, 12, 18, 24]
-            ],
-            "p50_horizon": horizons,
-            "p50_ci_low": [h * 0.8 for h in horizons],
-            "p50_ci_high": [h * 1.2 for h in horizons],
-            "p80_horizon": [h * 0.5 for h in horizons],
-            "p80_ci_low": [h * 0.4 for h in horizons],
-            "p80_ci_high": [h * 0.6 for h in horizons],
-        }
-    )
-
-
-@pytest.fixture
-def sample_df_exact():
-    """Synthetic data with exact dates for precise t calculation."""
+    h50 = exp(0.1 * t), h80 = exp(0.1 * t - 1) = h50 / e
+    So h80/h50 = 1/e ≈ 0.368, and k = log(0.25) / log(0.368) ≈ 1.39
+    """
+    base = date(2020, 1, 1)
     days_per_month = 30.44
     t_months = [0, 6, 12, 18, 24]
 
-    dates = [date(2020, 1, 1)]
-    for t in t_months[1:]:
+    dates = []
+    for t in t_months:
         days = int(t * days_per_month)
-        d = date(2020, 1, 1)
-        dates.append(date.fromordinal(d.toordinal() + days))
+        dates.append(date.fromordinal(base.toordinal() + days))
 
-    horizons = [np.exp(0.1 * t) for t in t_months]
+    h50 = [np.exp(0.1 * t) for t in t_months]
+    h80 = [np.exp(0.1 * t - 1) for t in t_months]  # h80 = h50 / e
 
     return pd.DataFrame(
         {
             "model": [f"model_{i}" for i in range(len(t_months))],
             "release_date": dates,
-            "p50_horizon": horizons,
-            "p50_ci_low": [h * 0.8 for h in horizons],
-            "p50_ci_high": [h * 1.2 for h in horizons],
-            "p80_horizon": [h * 0.5 for h in horizons],
-            "p80_ci_low": [h * 0.4 for h in horizons],
-            "p80_ci_high": [h * 0.6 for h in horizons],
+            "p50_horizon": h50,
+            "p80_horizon": h80,
         }
     )
+
+
+@pytest.fixture
+def sample_fit(sample_df):
+    """Fit from synthetic data."""
+    return fit_metr(sample_df)
 
 
 # --- Tests for fit_metr ---
 
 
-def test_fit_metr_slope(sample_df_exact):
-    """Fit recovers approximately correct slope."""
-    fit = fit_metr(sample_df_exact)
-    assert fit.slope == pytest.approx(0.1, rel=0.05)
+def test_fit_metr_slope_50(sample_fit):
+    """Fit recovers correct slope for h50."""
+    assert sample_fit.slope_50 == pytest.approx(0.1, rel=0.05)
 
 
-def test_fit_metr_intercept(sample_df_exact):
-    """Fit recovers approximately correct intercept."""
-    fit = fit_metr(sample_df_exact)
-    assert fit.intercept == pytest.approx(0.0, abs=0.1)
+def test_fit_metr_slope_80(sample_fit):
+    """Fit recovers correct slope for h80 (same as h50)."""
+    assert sample_fit.slope_80 == pytest.approx(0.1, rel=0.05)
 
 
-def test_fit_metr_r_squared(sample_df_exact):
+def test_fit_metr_intercept_50(sample_fit):
+    """Fit recovers correct intercept for h50."""
+    assert sample_fit.intercept_50 == pytest.approx(0.0, abs=0.1)
+
+
+def test_fit_metr_intercept_80(sample_fit):
+    """Fit recovers correct intercept for h80 (shifted by -1)."""
+    assert sample_fit.intercept_80 == pytest.approx(-1.0, abs=0.1)
+
+
+def test_fit_metr_r_squared(sample_fit):
     """Perfect exponential data should give R² ≈ 1."""
-    fit = fit_metr(sample_df_exact)
-    assert fit.r_squared > 0.99
+    assert sample_fit.r_squared_50 > 0.99
+    assert sample_fit.r_squared_80 > 0.99
 
 
-def test_fit_metr_doubling_time(sample_df_exact):
-    """Doubling time should be ln(2)/slope ≈ 6.93 months."""
-    fit = fit_metr(sample_df_exact)
-    expected = np.log(2) / 0.1
-    assert fit.doubling_time_months == pytest.approx(expected, rel=0.05)
-
-
-def test_fit_metr_base_date(sample_df_exact):
+def test_fit_metr_base_date(sample_fit):
     """Base date should be earliest date in data."""
-    fit = fit_metr(sample_df_exact)
-    assert fit.base_date == date(2020, 1, 1)
+    assert sample_fit.base_date == date(2020, 1, 1)
 
 
-def test_fit_metr_residual_std(sample_df_exact):
-    """Perfect exponential data should have near-zero residual std."""
-    fit = fit_metr(sample_df_exact)
-    assert fit.residual_std < 0.01
+def test_fit_metr_cov_matrix_shape(sample_fit):
+    """Covariance matrix should be 4x4."""
+    assert sample_fit.cov_matrix.shape == (4, 4)
 
 
-def test_fit_metr_horizon_type_p50(sample_df_exact):
-    """Default horizon type should be p50."""
-    fit = fit_metr(sample_df_exact)
-    assert fit.horizon_type == "p50"
+def test_fit_metr_cov_matrix_symmetric(sample_fit):
+    """Covariance matrix should be symmetric."""
+    assert np.allclose(sample_fit.cov_matrix, sample_fit.cov_matrix.T)
 
 
-def test_fit_metr_horizon_type_p80(sample_df_exact):
-    """Can fit p80 horizon."""
-    fit = fit_metr(sample_df_exact, horizon="p80")
-    assert fit.horizon_type == "p80"
+# --- Tests for METRFit.sample_horizons ---
 
 
-def test_fit_metr_invalid_horizon(sample_df_exact):
-    """Invalid horizon type should raise ValueError."""
-    with pytest.raises(ValueError):
-        fit_metr(sample_df_exact, horizon="p90")
+def test_sample_horizons_h50_at_t0(sample_fit):
+    """At t=0, h50 should be exp(intercept_50) ≈ 1."""
+    np.random.seed(42)
+    h50, h80 = sample_fit.sample_horizons(t_months=0, n=1000)
+    assert np.median(h50) == pytest.approx(1.0, rel=0.1)
 
 
-# --- Tests for METRFit.sample_params ---
+def test_sample_horizons_h80_at_t0(sample_fit):
+    """At t=0, h80 should be exp(intercept_80) ≈ 1/e ≈ 0.368."""
+    np.random.seed(42)
+    h50, h80 = sample_fit.sample_horizons(t_months=0, n=1000)
+    assert np.median(h80) == pytest.approx(1 / np.e, rel=0.1)
 
 
-def test_sample_params_correlation():
-    """Sampled params should have approximately correct correlation."""
-    sq.set_seed(42)
+def test_sample_horizons_grow_over_time(sample_fit):
+    """Horizons should grow over time."""
+    np.random.seed(42)
+    h50_0, h80_0 = sample_fit.sample_horizons(t_months=0, n=1000)
+    h50_12, h80_12 = sample_fit.sample_horizons(t_months=12, n=1000)
+    assert np.median(h50_12) > np.median(h50_0)
+    assert np.median(h80_12) > np.median(h80_0)
+
+
+# --- Tests for METRFit.sample_k ---
+
+
+def test_sample_k_value(sample_fit):
+    """k should be approximately log(0.25) / log(1/e) ≈ 1.39."""
+    np.random.seed(42)
+    k = sample_fit.sample_k(t_months=0, n=1000)
+    expected_k = np.log(0.25) / np.log(1 / np.e)  # ≈ 1.39
+    assert np.median(k) == pytest.approx(expected_k, rel=0.1)
+
+
+def test_sample_k_consistent_over_time(sample_fit):
+    """k should be roughly constant if h50 and h80 have same slope."""
+    np.random.seed(42)
+    k_0 = sample_fit.sample_k(t_months=0, n=1000)
+    k_12 = sample_fit.sample_k(t_months=12, n=1000)
+    assert np.median(k_0) == pytest.approx(np.median(k_12), rel=0.2)
+
+
+# --- Tests for METRFit.success_probability ---
+
+
+def test_success_probability_at_h50(sample_fit):
+    """Success probability at task = h50 should be ~50%."""
+    np.random.seed(42)
+    h50, _ = sample_fit.sample_horizons(t_months=12, n=1)
+    task_min = h50[0]
+    probs = sample_fit.success_probability(task_min, t_months=12, n=1000)
+    assert np.median(probs) == pytest.approx(0.5, abs=0.1)
+
+
+def test_success_probability_at_h80(sample_fit):
+    """Success probability at task = h80 should be ~80%."""
+    np.random.seed(42)
+    _, h80 = sample_fit.sample_horizons(t_months=12, n=1)
+    task_min = h80[0]
+    probs = sample_fit.success_probability(task_min, t_months=12, n=1000)
+    assert np.median(probs) == pytest.approx(0.8, abs=0.1)
+
+
+def test_success_probability_short_task():
+    """Very short tasks should have high success probability."""
     fit = METRFit(
-        intercept=0.0,
-        intercept_se=1.0,
-        slope=0.1,
-        slope_se=0.01,
-        correlation=-0.9,
+        intercept_50=0.0,
+        slope_50=0.1,
+        intercept_80=-1.0,
+        slope_80=0.1,
+        cov_matrix=np.eye(4) * 0.001,  # tiny uncertainty
         base_date=date(2020, 1, 1),
-        r_squared=0.99,
-        residual_std=0.1,
-        horizon_type="p50",
+        r_squared_50=0.99,
+        r_squared_80=0.99,
+        residual_std_50=0.01,
+        residual_std_80=0.01,
     )
-    intercepts, slopes = fit.sample_params(10000)
-    empirical_corr = np.corrcoef(intercepts, slopes)[0, 1]
-    assert empirical_corr == pytest.approx(-0.9, abs=0.05)
+    np.random.seed(42)
+    # At t=12, h50 ≈ exp(1.2) ≈ 3.3 min. A 0.1 min task should be very easy.
+    probs = fit.success_probability(task_min=0.1, t_months=12, n=1000)
+    assert np.median(probs) > 0.95
 
 
-def test_sample_params_means():
-    """Sampled params should have approximately correct means."""
-    sq.set_seed(42)
+def test_success_probability_long_task():
+    """Very long tasks should have low success probability."""
     fit = METRFit(
-        intercept=-3.0,
-        intercept_se=0.5,
-        slope=0.1,
-        slope_se=0.01,
-        correlation=-0.9,
+        intercept_50=0.0,
+        slope_50=0.1,
+        intercept_80=-1.0,
+        slope_80=0.1,
+        cov_matrix=np.eye(4) * 0.001,  # tiny uncertainty
         base_date=date(2020, 1, 1),
-        r_squared=0.99,
-        residual_std=0.1,
-        horizon_type="p50",
+        r_squared_50=0.99,
+        r_squared_80=0.99,
+        residual_std_50=0.01,
+        residual_std_80=0.01,
     )
-    intercepts, slopes = fit.sample_params(10000)
-    assert np.mean(intercepts) == pytest.approx(-3.0, abs=0.05)
-    assert np.mean(slopes) == pytest.approx(0.1, abs=0.005)
+    np.random.seed(42)
+    # At t=12, h50 ≈ 3.3 min. A 1000 min task should be very hard.
+    probs = fit.success_probability(task_min=1000, t_months=12, n=1000)
+    assert np.median(probs) < 0.05
 
 
-# --- Tests for METRFit.horizon_at ---
-
-
-def test_horizon_at_t0():
-    """At t=0, horizon should be exp(intercept)."""
-    sq.set_seed(42)
+def test_success_probability_improves_over_time():
+    """Same task should have higher success probability later."""
     fit = METRFit(
-        intercept=2.0,
-        intercept_se=0.01,  # small SE for tight test
-        slope=0.1,
-        slope_se=0.001,
-        correlation=0.0,
+        intercept_50=0.0,
+        slope_50=0.1,
+        intercept_80=-1.0,
+        slope_80=0.1,
+        cov_matrix=np.eye(4) * 0.001,
         base_date=date(2020, 1, 1),
-        r_squared=0.99,
-        residual_std=0.01,
-        horizon_type="p50",
+        r_squared_50=0.99,
+        r_squared_80=0.99,
+        residual_std_50=0.01,
+        residual_std_80=0.01,
     )
-    h = fit.horizon_at(t_months=0, n=1000)
-    expected = np.exp(2.0)
-    assert np.median(h) == pytest.approx(expected, rel=0.05)
-
-
-def test_horizon_at_grows():
-    """Horizon should grow with time."""
-    sq.set_seed(42)
-    fit = METRFit(
-        intercept=0.0,
-        intercept_se=0.1,
-        slope=0.1,
-        slope_se=0.01,
-        correlation=-0.9,
-        base_date=date(2020, 1, 1),
-        r_squared=0.99,
-        residual_std=0.1,
-        horizon_type="p50",
-    )
-    h0 = fit.horizon_at(t_months=0, n=1000)
-    h12 = fit.horizon_at(t_months=12, n=1000)
-    assert np.median(h12) > np.median(h0)
-
-
-def test_horizon_at_date():
-    """horizon_at_date should give same result as horizon_at with correct t."""
-    sq.set_seed(42)
-    fit = METRFit(
-        intercept=0.0,
-        intercept_se=0.1,
-        slope=0.1,
-        slope_se=0.01,
-        correlation=0.0,
-        base_date=date(2020, 1, 1),
-        r_squared=0.99,
-        residual_std=0.1,
-        horizon_type="p50",
-    )
-
-    # 1 year = ~12 months
-    sq.set_seed(42)
-    h_by_date = fit.horizon_at_date(date(2021, 1, 1), n=1000)
-
-    t_months = (date(2021, 1, 1) - date(2020, 1, 1)).days / 30.44
-    sq.set_seed(42)
-    h_by_months = fit.horizon_at(t_months, n=1000)
-
-    assert np.median(h_by_date) == pytest.approx(np.median(h_by_months), rel=0.01)
-
-
-def test_prediction_interval_wider_than_confidence():
-    """Prediction interval should be wider than confidence interval."""
-    sq.set_seed(42)
-    fit = METRFit(
-        intercept=0.0,
-        intercept_se=0.1,
-        slope=0.1,
-        slope_se=0.01,
-        correlation=0.0,
-        base_date=date(2020, 1, 1),
-        r_squared=0.99,
-        residual_std=0.5,  # substantial residual variance
-        horizon_type="p50",
-    )
-
-    n = 5000
-    h_ci = fit.horizon_at(t_months=12, n=n)
-    h_pred = fit.horizon_at_prediction(t_months=12, n=n)
-
-    ci_width = np.percentile(h_ci, 95) - np.percentile(h_ci, 5)
-    pred_width = np.percentile(h_pred, 95) - np.percentile(h_pred, 5)
-
-    assert pred_width > ci_width
+    np.random.seed(42)
+    probs_early = fit.success_probability(task_min=10, t_months=0, n=1000)
+    probs_late = fit.success_probability(task_min=10, t_months=24, n=1000)
+    assert np.median(probs_late) > np.median(probs_early)
