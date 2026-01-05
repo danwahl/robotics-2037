@@ -90,6 +90,12 @@ def test_fit_metr_cov_matrix_symmetric(sample_fit):
     assert np.allclose(sample_fit.cov_matrix, sample_fit.cov_matrix.T)
 
 
+def test_h80_h50_ratio(sample_fit):
+    """h80/h50 ratio should match exp(intercept_80 - intercept_50)."""
+    expected = np.exp(sample_fit.intercept_80 - sample_fit.intercept_50)
+    assert sample_fit.h80_h50_ratio == pytest.approx(expected)
+
+
 # --- Tests for METRFit.sample_horizons ---
 
 
@@ -214,3 +220,95 @@ def test_success_probability_improves_over_time():
     probs_early = fit.success_probability(task_min=10, t_months=0, n=1000)
     probs_late = fit.success_probability(task_min=10, t_months=24, n=1000)
     assert np.median(probs_late) > np.median(probs_early)
+
+
+# --- Tests for ceiling (logistic) ---
+
+
+def test_ceiling_saturates():
+    """With ceiling, horizons should saturate."""
+    fit = METRFit(
+        intercept_50=0.0,
+        slope_50=0.1,
+        intercept_80=-1.0,
+        slope_80=0.1,
+        cov_matrix=np.eye(4) * 0.001,
+        base_date=date(2020, 1, 1),
+        r_squared_50=0.99,
+        r_squared_80=0.99,
+        residual_std_50=0.01,
+        residual_std_80=0.01,
+    )
+    np.random.seed(42)
+    ceiling = 1000.0
+    h50_late, _ = fit.sample_horizons(t_months=500, n=1000, ceiling=ceiling)
+    # Should be near ceiling
+    assert np.median(h50_late) == pytest.approx(ceiling, rel=0.01)
+
+
+def test_ceiling_matches_exponential_early():
+    """With ceiling, early values should match exponential."""
+    fit = METRFit(
+        intercept_50=0.0,
+        slope_50=0.1,
+        intercept_80=-1.0,
+        slope_80=0.1,
+        cov_matrix=np.eye(4) * 0.0001,
+        base_date=date(2020, 1, 1),
+        r_squared_50=0.99,
+        r_squared_80=0.99,
+        residual_std_50=0.01,
+        residual_std_80=0.01,
+    )
+    ceiling = 100000.0  # high ceiling
+    np.random.seed(42)
+    h50_exp, _ = fit.sample_horizons(t_months=0, n=1000, ceiling=None)
+    np.random.seed(42)
+    h50_log, _ = fit.sample_horizons(t_months=0, n=1000, ceiling=ceiling)
+    # Should be very close at t=0
+    assert np.median(h50_log) == pytest.approx(np.median(h50_exp), rel=0.05)
+
+
+def test_ceiling_h80_maintains_ratio():
+    """h80 ceiling should maintain ratio to h50 ceiling."""
+    fit = METRFit(
+        intercept_50=0.0,
+        slope_50=0.1,
+        intercept_80=-1.0,
+        slope_80=0.1,
+        cov_matrix=np.eye(4) * 0.001,
+        base_date=date(2020, 1, 1),
+        r_squared_50=0.99,
+        r_squared_80=0.99,
+        residual_std_50=0.01,
+        residual_std_80=0.01,
+    )
+    np.random.seed(42)
+    ceiling = 1000.0
+    h50_late, h80_late = fit.sample_horizons(t_months=500, n=1000, ceiling=ceiling)
+    # Both should be at their respective ceilings
+    assert np.median(h50_late) == pytest.approx(ceiling, rel=0.01)
+    assert np.median(h80_late) == pytest.approx(ceiling * fit.h80_h50_ratio, rel=0.01)
+
+
+def test_ceiling_array_input():
+    """Ceiling can be an array of per-sample values."""
+    fit = METRFit(
+        intercept_50=0.0,
+        slope_50=0.1,
+        intercept_80=-1.0,
+        slope_80=0.1,
+        cov_matrix=np.eye(4) * 0.001,
+        base_date=date(2020, 1, 1),
+        r_squared_50=0.99,
+        r_squared_80=0.99,
+        residual_std_50=0.01,
+        residual_std_80=0.01,
+    )
+    np.random.seed(42)
+    n = 1000
+    ceiling_array = np.linspace(500, 1500, n)  # varying ceilings
+    h50, h80 = fit.sample_horizons(t_months=500, n=n, ceiling=ceiling_array)
+    # Each sample should be near its own ceiling
+    assert h50[0] == pytest.approx(500, rel=0.05)
+    assert h50[-1] == pytest.approx(1500, rel=0.05)

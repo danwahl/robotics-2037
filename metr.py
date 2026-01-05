@@ -41,6 +41,11 @@ class METRFit:
         log(h50) = intercept_50 + slope_50 * t
         log(h80) = intercept_80 + slope_80 * t
 
+    If ceiling is passed to sample_horizons, uses logistic instead:
+        h50 = ceiling / (1 + exp(-k*(t - t0)))
+        h80 = ceiling * ratio / (1 + exp(-k*(t - t0)))
+        where ratio = exp(intercept_80 - intercept_50) preserves the p80/p50 relationship
+
     Success probability at task duration d:
         P(success) = 1 / (1 + (d / h50)^k)
         where k = log(0.25) / log(h80 / h50)
@@ -58,6 +63,11 @@ class METRFit:
     residual_std_80: float
 
     @property
+    def h80_h50_ratio(self) -> float:
+        """Ratio of h80 to h50 at t=0 (preserved in logistic ceiling)."""
+        return np.exp(self.intercept_80 - self.intercept_50)
+
+    @property
     def doubling_time_months(self) -> float:
         """Doubling time for h50 (and h80, assuming same slope)."""
         return np.log(2) / self.slope_50
@@ -67,25 +77,67 @@ class METRFit:
         mean = [self.intercept_50, self.slope_50, self.intercept_80, self.slope_80]
         return np.random.multivariate_normal(mean, self.cov_matrix, size=n)
 
-    def sample_horizons(self, t_months: float, n: int = 1000) -> tuple[np.ndarray, np.ndarray]:
-        """Sample h50 and h80 at time t (in months from base_date)."""
-        params = self.sample_params(n)
-        log_h50 = params[:, 0] + params[:, 1] * t_months
-        log_h80 = params[:, 2] + params[:, 3] * t_months
-        return np.exp(log_h50), np.exp(log_h80)
+    def sample_horizons(
+        self, t_months: float, n: int = 1000, ceiling: float | np.ndarray | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Sample h50 and h80 at time t (in months from base_date).
 
-    def sample_k(self, t_months: float, n: int = 1000) -> np.ndarray:
+        Args:
+            t_months: Time in months from base_date
+            n: Number of samples
+            ceiling: Optional p50 ceiling in minutes. Can be:
+                     - None: exponential (unbounded)
+                     - float: fixed ceiling for all samples
+                     - np.ndarray of length n: per-sample ceilings (for uncertainty)
+                     p80 ceiling is derived to maintain the same ratio as exponential fit.
+        """
+        params = self.sample_params(n)
+
+        # Handle ceiling array
+        if ceiling is not None and not isinstance(ceiling, np.ndarray):
+            ceiling = np.full(n, ceiling)
+
+        if ceiling is None:
+            # Exponential: h = exp(intercept + slope * t)
+            log_h50 = params[:, 0] + params[:, 1] * t_months
+            log_h80 = params[:, 2] + params[:, 3] * t_months
+            return np.exp(log_h50), np.exp(log_h80)
+        else:
+            # Logistic: h50 = L / (1 + exp(-k*(t - t0)))
+            # k = slope, t0 = ln(L/exp(intercept) - 1) / k
+            L_50 = ceiling
+            L_80 = ceiling * self.h80_h50_ratio  # maintain ratio
+
+            k_50 = params[:, 1]
+            t0_50 = np.log(np.maximum(L_50 / np.exp(params[:, 0]) - 1, 1e-10)) / k_50
+            h50 = L_50 / (1 + np.exp(-k_50 * (t_months - t0_50)))
+
+            k_80 = params[:, 3]
+            t0_80 = np.log(np.maximum(L_80 / np.exp(params[:, 2]) - 1, 1e-10)) / k_80
+            h80 = L_80 / (1 + np.exp(-k_80 * (t_months - t0_80)))
+
+            return h50, h80
+
+    def sample_k(
+        self, t_months: float, n: int = 1000, ceiling: float | np.ndarray | None = None
+    ) -> np.ndarray:
         """Sample sigmoid steepness k at time t."""
-        h50, h80 = self.sample_horizons(t_months, n)
+        h50, h80 = self.sample_horizons(t_months, n, ceiling=ceiling)
         return np.log(0.25) / np.log(h80 / h50)
 
-    def success_probability(self, task_min: float, t_months: float, n: int = 1000) -> np.ndarray:
+    def success_probability(
+        self,
+        task_min: float,
+        t_months: float,
+        n: int = 1000,
+        ceiling: float | np.ndarray | None = None,
+    ) -> np.ndarray:
         """
         Sample success probability for a task of given duration at time t.
 
         Returns array of n probability samples.
         """
-        h50, h80 = self.sample_horizons(t_months, n)
+        h50, h80 = self.sample_horizons(t_months, n, ceiling=ceiling)
         k = np.log(0.25) / np.log(h80 / h50)
 
         # Numerically stable: compute in log space to avoid overflow
@@ -94,10 +146,12 @@ class METRFit:
         log_ratio = np.clip(log_ratio, -50, 50)
         return 1 / (1 + np.exp(log_ratio))
 
-    def success_probability_at_date(self, task_min: float, d: date, n: int = 1000) -> np.ndarray:
+    def success_probability_at_date(
+        self, task_min: float, d: date, n: int = 1000, ceiling: float | np.ndarray | None = None
+    ) -> np.ndarray:
         """Sample success probability at a given date."""
         t_months = (d - self.base_date).days / 30.44
-        return self.success_probability(task_min, t_months, n)
+        return self.success_probability(task_min, t_months, n, ceiling=ceiling)
 
 
 def fit_metr(df: pd.DataFrame) -> METRFit:
@@ -167,33 +221,35 @@ if __name__ == "__main__":
     fit = fit_metr(df)
 
     print(
-        f"h50 fit: log(h) = {fit.intercept_50:.4f} + {fit.slope_50:.5f} * t "
-        "(R² = {fit.r_squared_50:.3f})"
+        f"h50 fit: log(h) = {fit.intercept_50:.4f} + {fit.slope_50:.5f} * t  "
+        f"(R² = {fit.r_squared_50:.3f})"
     )
-    print(
-        f"h80 fit: log(h) = {fit.intercept_80:.4f} + {fit.slope_80:.5f} * t "
-        "(R² = {fit.r_squared_80:.3f})"
-    )
+    print(f"h80/h50 ratio: {fit.h80_h50_ratio:.3f}")
     print(f"Doubling time: {fit.doubling_time_months:.2f} months")
     print()
 
-    # Sample at Jan 2026
-    d = date(2026, 1, 4)
-    h50, h80 = fit.sample_horizons((d - fit.base_date).days / 30.44, n=10000)
-    k = fit.sample_k((d - fit.base_date).days / 30.44, n=10000)
+    # Compare predictions at Jan 2030
+    d = date(2030, 1, 1)
+    t = (d - fit.base_date).days / 30.44
 
-    print(f"At {d}:")
-    print(f"  h50: {np.median(h50):.0f} min ({np.median(h50) / 60:.1f} hr)")
-    print(f"  h80: {np.median(h80):.0f} min ({np.median(h80) / 60:.1f} hr)")
-    print(f"  k (steepness): {np.median(k):.2f}")
-    print()
+    # Exponential (no ceiling)
+    h50_exp, h80_exp = fit.sample_horizons(t, n=10000)
 
-    # Success probability for different task lengths
-    print("Success probability by task length:")
-    for task_hr in [0.5, 1, 2, 4, 8, 16]:
-        task_min = task_hr * 60
-        probs = fit.success_probability_at_date(task_min, d, n=10000)
-        print(
-            f"  {task_hr:4.1f} hr: {np.median(probs) * 100:5.1f}% "
-            f"[90% CI: {np.percentile(probs, 5) * 100:.1f}-{np.percentile(probs, 95) * 100:.1f}%]"
-        )
+    # Logistic with fixed ceiling
+    ceiling_1mo = 30 * 24 * 60  # 1 month
+    h50_log, h80_log = fit.sample_horizons(t, n=10000, ceiling=ceiling_1mo)
+
+    # Logistic with uncertain ceiling (sampled from distribution)
+    import squigglepy as sq
+
+    ceiling_dist = sq.lognorm(7 * 24 * 60, 90 * 24 * 60)  # 90% CI: 1 week to 3 months
+    ceiling_samples = ceiling_dist @ 10000
+    h50_unc, h80_unc = fit.sample_horizons(t, n=10000, ceiling=ceiling_samples)
+
+    print(f"h50 at {d}:")
+    print(f"  Exponential:        {np.median(h50_exp) / 60 / 24:6.1f} days")
+    print(f"  Logistic (1 month): {np.median(h50_log) / 60 / 24:6.1f} days")
+    print(
+        f"  Logistic (uncertain): {np.median(h50_unc) / 60 / 24:6.1f} days [90% CI: "
+        f"{np.percentile(h50_unc, 5) / 60 / 24:.1f}-{np.percentile(h50_unc, 95) / 60 / 24:.1f}]"
+    )
