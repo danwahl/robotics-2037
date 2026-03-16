@@ -22,7 +22,7 @@ class EnergyConstraint:
     Logistic growth from current cluster power toward grid-scale limit.
     """
 
-    current_gw: float = 0.1  # ~100 MW clusters (2024)
+    current_gw: float = 0.15  # ~150 MW max cluster in early 2024
     max_gw: float = 7.0  # grid-scale limit
     growth_rate: float = 0.6  # annual logistic rate
 
@@ -40,22 +40,47 @@ class EnergyConstraint:
 
 @dataclass
 class ComputeConstraint:
-    """GPU supply and hardware efficiency, capped by energy."""
+    """Frontier compute: global GPU supply × concentration fraction × efficiency.
 
-    gpu_growth_rate: float = np.log(4)  # 4x/year GPU supply
+    Global GPU supply grows at ~1.7x/yr, but frontier labs grab an increasing
+    share. This concentration fraction grows logistically toward a cap,
+    after which frontier compute growth drops to the global rate.
+    """
+
+    gpu_growth_rate: float = np.log(1.7)  # ~1.7x/year global GPU supply
     hw_efficiency_rate: float = np.log(1.4)  # 40%/year FLOP/watt
+    concentration_initial: float = 0.02  # ~2% of global supply in 2024
+    concentration_max: float = 0.15  # cap at ~15% of global supply
+    concentration_growth: float = 1.0  # rapid logistic growth
+
+    def concentration_at(self, t_years: float) -> float:
+        """Fraction of global GPU supply used by frontier lab."""
+        odds_0 = self.concentration_initial / (
+            self.concentration_max - self.concentration_initial
+        )
+        return self.concentration_max / (
+            1 + (1 / odds_0) * np.exp(-self.concentration_growth * t_years)
+        )
 
     def growth_factor(
         self, t_years: float, energy: EnergyConstraint | None = None
     ) -> float:
-        """Cumulative compute growth relative to t=0."""
-        gpu_factor = np.exp(self.gpu_growth_rate * t_years)
+        """Cumulative frontier compute growth relative to t=0."""
+        global_gpu = np.exp(self.gpu_growth_rate * t_years)
+        concentration = self.concentration_at(t_years)
+        concentration_0 = self.concentration_initial
+        efficiency = np.exp(self.hw_efficiency_rate * t_years)
+        conc_ratio = concentration / concentration_0
+
+        # Frontier = global * concentration * efficiency
+        frontier = global_gpu * conc_ratio * efficiency
+
         if energy is not None:
             energy_factor = energy.growth_factor(t_years)
-            efficiency_factor = np.exp(self.hw_efficiency_rate * t_years)
-            energy_limited = energy_factor * efficiency_factor
-            return min(gpu_factor, energy_limited)
-        return gpu_factor
+            energy_limited = energy_factor * efficiency * conc_ratio
+            return min(frontier, energy_limited)
+
+        return frontier
 
 
 @dataclass
@@ -81,7 +106,7 @@ class DataConstraint:
 
     human_data_max: float = 3.0  # max human data (multiple of current)
     human_growth_rate: float = 0.3  # annual logistic rate
-    synth_efficiency: float = 0.1  # synthetic data worth 10% of real
+    synth_efficiency: float = 0.02  # synthetic data worth ~2% of real (model collapse risk)
 
     def growth_factor(self, t_years: float, effective_compute: float) -> float:
         """Cumulative data growth relative to t=0."""
@@ -117,21 +142,41 @@ def resource_growth_rates(
 
     dt = np.diff(t_years)
 
-    # Effective compute at each time
+    # Effective compute at each time (frontier, energy-limited)
     eff_compute = np.array([
         compute.growth_factor(t, energy) * algo.growth_factor(t)
         for t in t_years
     ])
 
-    # Data at each time
+    # Global compute (no energy limit) for synthetic data generation
+    # Synth data can run on any compute, not just frontier clusters
+    global_compute = np.array([
+        compute.growth_factor(t, None) * algo.growth_factor(t)
+        for t in t_years
+    ])
+
+    # Data at each time (uses global compute for synth)
     eff_data = np.array([
-        data.growth_factor(t, ec)
-        for t, ec in zip(t_years, eff_compute)
+        data.growth_factor(t, gc)
+        for t, gc in zip(t_years, global_compute)
     ])
 
     # Instantaneous log-growth rates (d/dt ln(resource))
     compute_rates = np.diff(np.log(eff_compute)) / dt
     data_rates = np.diff(np.log(eff_data)) / dt
+
+    # Smooth rates with a small moving average to remove kinks
+    # from min() transitions in growth_factor
+    def _smooth(arr: np.ndarray, window: int = 15) -> np.ndarray:
+        if len(arr) < window:
+            return arr
+        kernel = np.ones(window) / window
+        # Pad edges to avoid shrinking
+        padded = np.pad(arr, window // 2, mode="edge")
+        return np.convolve(padded, kernel, mode="valid")[: len(arr)]
+
+    compute_rates = _smooth(compute_rates)
+    data_rates = _smooth(data_rates)
 
     # Binding rate = min of the two at each step
     binding_rates = np.minimum(compute_rates, data_rates)
@@ -139,11 +184,31 @@ def resource_growth_rates(
         compute_rates <= data_rates, "compute", "data"
     )
 
+    # Individual factor growth rates (before combining)
+    energy_factors = np.array([energy.growth_factor(t) for t in t_years])
+    gpu_factors = np.array([
+        np.exp(compute.gpu_growth_rate * t) for t in t_years
+    ])
+    conc_factors = np.array([
+        compute.concentration_at(t) / compute.concentration_initial
+        for t in t_years
+    ])
+    algo_factors = np.array([algo.growth_factor(t) for t in t_years])
+
+    energy_rates = _smooth(np.diff(np.log(energy_factors)) / dt)
+    gpu_rates = _smooth(np.diff(np.log(gpu_factors)) / dt)
+    conc_rates = _smooth(np.diff(np.log(conc_factors)) / dt)
+    algo_rates = _smooth(np.diff(np.log(algo_factors)) / dt)
+
     return {
         "compute": compute_rates,
         "data": data_rates,
         "binding": binding_rates,
         "binding_name": binding_names,
+        "energy": energy_rates,
+        "gpu": gpu_rates,
+        "concentration": conc_rates,
+        "algo": algo_rates,
         "t_mid": (t_years[:-1] + t_years[1:]) / 2,
     }
 
@@ -239,7 +304,7 @@ def sample_ceilings(
         )
         d = DataConstraint(
             human_data_max=rng.lognormal(np.log(3.0), 0.3),
-            synth_efficiency=rng.lognormal(np.log(0.1), 0.5),
+            synth_efficiency=rng.lognormal(np.log(0.02), 0.5),
         )
 
         # Compute constrained trajectory for this sample

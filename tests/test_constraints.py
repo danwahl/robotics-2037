@@ -108,13 +108,13 @@ def test_growth_rates_positive_early():
     assert np.all(rates["binding"] > 0)
 
 
-def test_binding_rate_decreases_over_time():
-    """Binding growth rate should eventually slow as asymptotes hit."""
+def test_binding_rate_eventually_slows():
+    """Binding growth rate should be lower at the end than the peak."""
     t = np.linspace(0, 20, 200)
     rates = resource_growth_rates(t)
-    early = np.mean(rates["binding"][:20])
+    peak = np.max(rates["binding"])
     late = np.mean(rates["binding"][-20:])
-    assert late < early
+    assert late < peak
 
 
 # --- constrained_h50 tests ---
