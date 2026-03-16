@@ -20,19 +20,38 @@ Quantitative forecasting model for AI + robotics capabilities, inspired by "AI 2
 
 ## Project structure
 
-- `metr.py` — core METR model (unified p50/p80 logistic fit with optional ceiling)
+- `metr.py` — METR model (unified p50/p80 logistic fit with optional ceiling)
+- `physical.py` — physical AI model (physical horizon + hardware capability + combined speedup)
 - `main.ipynb` — interactive analysis notebook
-- `data/benchmark_results.yaml` — METR benchmark data (15+ models, Mar 2024–Nov 2025)
-- `tests/test_metr.py` — 23 tests covering fit, sampling, success probability, ceiling behavior
+- `data/benchmark_results_1_0.yaml` — METR v1.0 benchmark data (original)
+- `data/benchmark_results_1_1.yaml` — METR v1.1 benchmark data (current, from https://metr.org/time-horizons/)
+- `tests/test_metr.py` — 23 tests for METR model
+- `tests/test_physical.py` — 16 tests for physical model
 
-## Current model (METR node)
+## Model structure
 
-One unified model fitting both h50 and h80 trends via log-linear regression:
+### METR node (metr.py)
+
+Log-linear fit to METR benchmark data (SOTA models, 2023+):
 - `success_probability(task_min, t_months)` uses sigmoid: `P = 1/(1 + (d/h50)^k)`
-- `k` (steepness) derived from h80/h50 ratio
-- 4x4 covariance matrix captures parameter uncertainty
-- Optional logistic ceiling (passed at sample time, can be scalar or distribution)
-- Ceiling applies to p50; p80 ceiling maintains the exponential-fit ratio
+- `k` derived from h80/h50 ratio; 4x4 covariance matrix for uncertainty
+- Optional logistic ceiling (scalar or distribution); p80 ceiling maintains ratio
+- Software speedup = `1/(1 - frac_automated)` where frac is probability-weighted over lognormal task distribution
+
+### Physical AI node (physical.py)
+
+Two sub-models combined multiplicatively:
+
+**PhysicalHorizon** — METR-equivalent for embodied tasks, 2 environment tiers:
+- Structured (factory/warehouse): h50 starts ~60 min, doubles every ~8 months
+- Unstructured (homes/varied): h50 starts ~4 min, doubles every ~14 months
+- Software coupling: fraction of SW speedup exponent transfers to physical improvement
+
+**HardwareCapability** — fraction of tasks that are hardware-feasible:
+- Structured starts ~0.75, unstructured ~0.20
+- Logistic growth toward 1.0, accelerated by software-driven design improvements
+
+Combined: `physical_speedup = 1/(1 - hw_feasibility * ai_automation_fraction)`
 
 ## Conversation history (Chroma MCP)
 
@@ -56,15 +75,14 @@ Side quest research conversation. Key findings:
 - Proposed hierarchy: compiles -> geometry matches -> passes FEA simulation -> manufacturable
 - FreeCAD + CalculiX for open-source simulation-in-the-loop validation
 
-## Planned next steps (from conversation)
+## Remaining work
 
-The conversation left off with the METR node and software speedup model working. Remaining work:
-1. **Software speedup integration** — wire speedup model into notebook with squigglepy distributions
-2. **Physical design node** — extend METR-style model to physical tasks (slower initial horizon, coupling to software speedup)
-3. **Hardware capability node** — model what % of physical tasks robots can do (dexterity, mobility, endurance, etc.)
-4. **Deployment/economics** — cost curves, manufacturing scale, regulation
-5. **Safety dynamics** — offense/defense balance, open-source lag, diffusion risk
-6. **Prediction market operationalization** — map model nodes to measurable/tradeable quantities
+1. **Ceiling for physical horizons** — structured h50 grows very fast; may need logistic ceiling like METR
+2. **Uncertainty/Monte Carlo for physical model** — currently deterministic; add sampling like METR model
+3. **Deployment/economics** — Wright's Law cost curves, Bass diffusion for adoption
+4. **Safety dynamics** — offense/defense balance, open-source lag, diffusion risk
+5. **Prediction market operationalization** — map model nodes to measurable/tradeable quantities
+6. **CadQueryEval integration** — user has https://danwahl.net/cadqueryeval for LLM design benchmarking
 
 ## User preferences
 
