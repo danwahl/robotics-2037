@@ -17,6 +17,7 @@ squigglepy = { git = "https://github.com/danwahl/squigglepy.git", branch = "upda
 
 [dependency-groups]
 dev = [
+    "nbconvert>=7.17.0",
     "pytest>=9.0.2",
     "ruff>=0.14.10",
 ]

@@ -1,4 +1,7 @@
-"""METR horizon model: fit and sample from AI task horizon data."""
+"""METR horizon model: fit and sample from AI task horizon data.
+
+Raw benchmark data from https://metr.org/time-horizons/
+"""
 
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -8,8 +11,13 @@ import pandas as pd
 import yaml
 
 
-def load_metr_data(path: str) -> pd.DataFrame:
-    """Load benchmark_results.yaml into a DataFrame."""
+def load_metr_data(path: str, sota_only: bool = False) -> pd.DataFrame:
+    """Load benchmark_results.yaml into a DataFrame.
+
+    Args:
+        path: Path to YAML file.
+        sota_only: If True, only include models marked is_sota.
+    """
     with open(path) as f:
         data = yaml.safe_load(f)
 
@@ -20,12 +28,18 @@ def load_metr_data(path: str) -> pd.DataFrame:
             release = datetime.strptime(release, "%Y-%m-%d").date()
 
         metrics = model_data["metrics"]
+        is_sota = metrics.get("is_sota", False)
+
+        if sota_only and not is_sota:
+            continue
+
         rows.append(
             {
                 "model": model_name,
                 "release_date": release,
                 "p50_horizon": metrics["p50_horizon_length"]["estimate"],
                 "p80_horizon": metrics["p80_horizon_length"]["estimate"],
+                "is_sota": is_sota,
             }
         )
 
@@ -217,7 +231,7 @@ def fit_metr(df: pd.DataFrame) -> METRFit:
 
 
 if __name__ == "__main__":
-    df = load_metr_data("data/benchmark_results.yaml")
+    df = load_metr_data("data/benchmark_results_1_1.yaml", sota_only=True)
     fit = fit_metr(df)
 
     print(
