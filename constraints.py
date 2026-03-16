@@ -195,3 +195,71 @@ def constrained_h50(
         log_h50[i + 1] = log_h50[i] + g_actual[i] * dt[i]
 
     return np.exp(log_h50)
+
+
+def sample_ceilings(
+    t_months_from_base: np.ndarray,
+    h50_now: float,
+    metr_doubling_months: float,
+    required_resource_doubling_months: float,
+    n_samples: int,
+    t_now_years: float = 2.1,
+) -> np.ndarray:
+    """Sample time-varying h50 ceilings with probabilistic constraints.
+
+    Samples uncertainty in: energy max, data max, synth efficiency,
+    algo decay rate. Returns ceiling array (n_times, n_samples).
+
+    Args:
+        t_months_from_base: Time array in months from METR base date.
+        h50_now: Current best observed h50 (minutes).
+        metr_doubling_months: Unconstrained METR doubling time.
+        required_resource_doubling_months: Calibrated required rate.
+        n_samples: Number of Monte Carlo samples.
+        t_now_years: Current time in years from 2024.
+
+    Returns:
+        Array of shape (len(t_months_from_base), n_samples) with
+        ceiling values in minutes for each (time, sample).
+    """
+    rng = np.random.default_rng()
+
+    # Time grid for constraint model (years from 2024)
+    t_years = np.linspace(t_now_years, 14, 300)
+
+    ceilings = np.zeros((len(t_months_from_base), n_samples))
+
+    for s in range(n_samples):
+        # Sample constraint parameters
+        e = EnergyConstraint(
+            max_gw=rng.lognormal(np.log(7.0), 0.3),
+        )
+        a = AlgorithmicEfficiency(
+            decay=rng.lognormal(np.log(0.25), 0.3),
+        )
+        d = DataConstraint(
+            human_data_max=rng.lognormal(np.log(3.0), 0.3),
+            synth_efficiency=rng.lognormal(np.log(0.1), 0.5),
+        )
+
+        # Compute constrained trajectory for this sample
+        h50_traj = constrained_h50(
+            t_years, h50_now, metr_doubling_months,
+            required_resource_doubling_months,
+            e, ComputeConstraint(), a, d,
+        )
+
+        # Interpolate to the requested time grid
+        for i, t_m in enumerate(t_months_from_base):
+            # Convert months-from-METR-base to years-from-2024
+            # METR base date ~= Mar 2023, so offset ~= -0.75 years
+            t_yr = t_m / 12.0 - 0.75
+            if t_yr <= t_now_years:
+                # Before now: ceiling is effectively infinite
+                ceilings[i, s] = 1e10
+            else:
+                idx = np.searchsorted(t_years, t_yr)
+                idx = min(idx, len(h50_traj) - 1)
+                ceilings[i, s] = h50_traj[idx]
+
+    return ceilings
