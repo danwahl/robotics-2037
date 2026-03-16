@@ -53,6 +53,25 @@ Two sub-models combined multiplicatively:
 
 Combined: `physical_speedup = 1/(1 - hw_feasibility * ai_automation_fraction)`
 
+## Glossary
+
+- **h50**: task duration (minutes) at which AI has 50% success probability
+- **h80**: task duration at which AI has 80% success (= h50 × h80_h50_ratio)
+- **k**: sigmoid steepness, derived from h50/h80 gap — controls how sharply success drops with task length
+- **METR horizon**: h50 for pure software/digital tasks, fitted from METR benchmark data
+- **physical horizon**: h50 for embodied/physical tasks, by environment tier
+- **ceiling**: logistic cap on h50 growth (METR: best observed to 30 days; structured: 60 days; unstructured: 18 hr)
+- **SW speedup**: `1/(1 - sw_automation_fraction)` — how much faster software work gets done
+- **sw_automation_fraction**: volume-weighted fraction of software work AI handles, via sigmoid over lognormal task distribution
+- **hardware feasibility (HW)**: fraction of physical tasks robots can physically attempt (dexterity, mobility, battery, etc.) — independent of AI capability
+- **ai_automation_fraction**: volume-weighted fraction of physical tasks AI can handle (ignoring hardware), via sigmoid over physical task distribution using physical horizon
+- **physical automation fraction**: `hw_feasibility × ai_automation_fraction` — needs both capable hardware AND competent AI
+- **physical speedup (Phys-S / Phys-U)**: `1/(1 - physical_automation_fraction)` — combined speedup for physical work
+- **sw_coupling** (0.3): how much SW speedup accelerates the physical AI doubling rate
+- **sw_design_coupling** (0.05): how much SW speedup accelerates hardware R&D (weaker — atoms are slow)
+- **structured**: factory/warehouse — known layout, repetitive tasks, controlled environment
+- **unstructured**: homes/construction/varied — novel layouts, diverse tasks, high entropy
+
 ## Conversation history (Chroma MCP)
 
 Two relevant conversations in `claude_conversations` collection:
@@ -75,14 +94,18 @@ Side quest research conversation. Key findings:
 - Proposed hierarchy: compiles -> geometry matches -> passes FEA simulation -> manufacturable
 - FreeCAD + CalculiX for open-source simulation-in-the-loop validation
 
+## Key reference points
+
+- Waymo: 10M sim miles/day (100:1 sim-to-real ratio), World Model built on Genie 3 generates novel scenarios. Classified as "structured" in our 2-tier model despite operating on public roads — the domain is narrow and well-mapped.
+- Figure Helix 02: ~4 min autonomous household task (our unstructured anchor)
+- Industrial picking (RightHand): 1,200 picks/hr at >99.5% (our structured anchor)
+
 ## Remaining work
 
-1. **Ceiling for physical horizons** — structured h50 grows very fast; may need logistic ceiling like METR
-2. **Uncertainty/Monte Carlo for physical model** — currently deterministic; add sampling like METR model
-3. **Deployment/economics** — Wright's Law cost curves, Bass diffusion for adoption
-4. **Safety dynamics** — offense/defense balance, open-source lag, diffusion risk
-5. **Prediction market operationalization** — map model nodes to measurable/tradeable quantities
-6. **CadQueryEval integration** — user has https://danwahl.net/cadqueryeval for LLM design benchmarking
+1. **Deployment/economics** — Wright's Law cost curves, Bass diffusion for adoption
+2. **Safety dynamics** — offense/defense balance, open-source lag, diffusion risk
+3. **Prediction market operationalization** — map model nodes to measurable/tradeable quantities
+4. **CadQueryEval integration** — user has https://danwahl.net/cadqueryeval for LLM design benchmarking
 
 ## User preferences
 
