@@ -22,11 +22,14 @@ Quantitative forecasting model for AI + robotics capabilities, inspired by "AI 2
 
 - `metr.py` — METR model (unified p50/p80 logistic fit with optional ceiling)
 - `physical.py` — physical AI model (physical horizon + hardware capability + combined speedup)
+- `constraints.py` — resource constraint models (energy, compute, algo, data, fleet)
 - `main.ipynb` — interactive analysis notebook
 - `data/benchmark_results_1_0.yaml` — METR v1.0 benchmark data (original)
 - `data/benchmark_results_1_1.yaml` — METR v1.1 benchmark data (current, from https://metr.org/time-horizons/)
 - `tests/test_metr.py` — 23 tests for METR model
-- `tests/test_physical.py` — 16 tests for physical model
+- `tests/test_physical.py` — tests for physical model
+- `tests/test_constraints.py` — tests for constraint models
+- `SOURCES.md` — bibliography of data sources and references
 
 ## Model structure
 
@@ -38,14 +41,25 @@ Log-linear fit to METR benchmark data (SOTA models, 2023+):
 - Optional logistic ceiling (scalar or distribution); p80 ceiling maintains ratio
 - Software speedup = `1/(1 - frac_automated)` where frac is probability-weighted over lognormal task distribution
 
+### Resource constraints (constraints.py)
+
+Replaces hand-wavy ceilings with principled resource-gap model:
+- Four compute components (GPU supply, energy, concentration, algo efficiency) stack additively in log-growth-rate space
+- Data constraint: human data (logistic cap at 3x) + synthetic (2% efficiency × compute)
+- Calibrated so throttle=1.0 at present; constraints bite as concentration caps out
+- Compute concentration: frontier labs grab increasing share of global GPU supply (~2% → ~15% cap)
+
 ### Physical AI node (physical.py)
 
-Two sub-models combined multiplicatively:
+Three independent limits on physical h50:
 
-**PhysicalHorizon** — METR-equivalent for embodied tasks, 2 environment tiers:
-- Structured (factory/warehouse): h50 starts ~60 min, doubles every ~8 months
-- Unstructured (homes/varied): h50 starts ~4 min, doubles every ~14 months
-- Software coupling: fraction of SW speedup exponent transfers to physical improvement
+**SW cognitive throttle** (inherited): physical horizon growth couples to SW speedup (sw_coupling=0.3)
+
+**Physical data wall** (fleet-limited): robots collect training data in real-time (~3 hrs/robot/day). Fleet grows logistically from ~2K to ~2M robots, doubling every ~18 months. When fleet growth slows, physical data rate drops below required rate.
+
+**Entropic ceiling** (physics-limited): hard caps on max autonomous task duration that don't improve with better AI — they're properties of the environment, not the robot:
+- Structured: 60 days (factory maintenance/supply cycles)
+- Unstructured: 18 hours (diurnal cycle + environmental chaos)
 
 **HardwareCapability** — fraction of tasks that are hardware-feasible:
 - Structured starts ~0.75, unstructured ~0.20
@@ -60,7 +74,11 @@ Combined: `physical_speedup = 1/(1 - hw_feasibility * ai_automation_fraction)`
 - **k**: sigmoid steepness, derived from h50/h80 gap — controls how sharply success drops with task length
 - **METR horizon**: h50 for pure software/digital tasks, fitted from METR benchmark data
 - **physical horizon**: h50 for embodied/physical tasks, by environment tier
-- **ceiling**: logistic cap on h50 growth (METR: best observed to 30 days; structured: 60 days; unstructured: 18 hr)
+- **ceiling**: cap on h50 growth. SW uses resource-gap model; physical uses entropic ceilings
+- **entropic ceiling**: hard cap on physical h50 from environmental properties (structured: 60 days, unstructured: 18 hr) — doesn't improve with better AI
+- **fleet data wall**: constraint on physical AI from real-time data collection rate (fleet size × hours/robot/day)
+- **compute concentration**: frontier labs' share of global GPU supply (~2% → ~15% cap), explains why frontier compute grows faster than global supply
+- **resource-gap throttle**: `min(1, actual_resource_rate / required_rate)` — h50 grows at METR rate × throttle
 - **SW speedup**: `1/(1 - sw_automation_fraction)` — how much faster software work gets done
 - **sw_automation_fraction**: volume-weighted fraction of software work AI handles, via sigmoid over lognormal task distribution
 - **hardware feasibility (HW)**: fraction of physical tasks robots can physically attempt (dexterity, mobility, battery, etc.) — independent of AI capability
@@ -113,3 +131,4 @@ Side quest research conversation. Key findings:
 - Uses `uv` for all Python commands
 - Comfortable with Python, probabilistic modeling, squigglepy
 - Wants parsimonious models — simple first, add complexity only when justified
+- Use Gemini MCP (session ID: 29f3eae0-9938-4b21-b8d3-cba28911c296) for cross-checking model design. Gemini has full context on the model structure and has provided key insights (compute concentration, entropic ceilings, resource-gap approach). Resume the session for continuity.

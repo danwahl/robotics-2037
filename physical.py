@@ -2,6 +2,11 @@
 
 Extends the METR software horizon model to physical/robotic tasks, segmented
 by environment type (structured vs unstructured).
+
+Three independent limits on physical h50:
+1. SW cognitive throttle (inherited via sw_coupling)
+2. Physical data wall (fleet-limited real-time data collection)
+3. Entropic ceiling (hard cap from environmental properties)
 """
 
 from dataclasses import dataclass
@@ -10,12 +15,44 @@ import numpy as np
 
 
 @dataclass
+class FleetConstraint:
+    """Robot fleet size for physical training data collection.
+
+    Robots collect data in real-time (~3 hrs/robot/day). Fleet grows
+    logistically from ~2K to ~2M, doubling every ~18 months.
+
+    Args:
+        current_fleet: Data-collecting robots in 2026.
+        max_fleet: Logistic asymptote.
+        doubling_months: Fleet doubling time.
+        hours_per_robot_day: Useful training data per robot per day.
+    """
+
+    current_fleet: float = 2000
+    max_fleet: float = 2_000_000
+    doubling_months: float = 18.0
+    hours_per_robot_day: float = 3.0
+
+    def fleet_at(self, t_months: float) -> float:
+        """Fleet size at time t (months from Jan 2026)."""
+        rate = np.log(2) / self.doubling_months
+        odds_0 = self.current_fleet / (self.max_fleet - self.current_fleet)
+        return self.max_fleet / (
+            1 + (1 / odds_0) * np.exp(-rate * t_months)
+        )
+
+    def growth_factor(self, t_months: float) -> float:
+        """Cumulative fleet data growth relative to t=0."""
+        return self.fleet_at(t_months) / self.current_fleet
+
+
+@dataclass
 class PhysicalHorizon:
     """Physical AI task horizon by environment type.
 
-    Models the h50 (50% success) horizon for physical tasks, analogous to
-    METR's software task horizon. Starts lower than METR, with a slower
-    doubling time that accelerates via software speedup coupling.
+    Uses resource-gap throttling (like the SW constraint model):
+    physical h50 grows at base rate, throttled by fleet data availability
+    and boosted by SW coupling, capped by entropic ceilings.
 
     Args:
         initial_h50_structured: Starting h50 for structured envs (minutes).
@@ -23,9 +60,10 @@ class PhysicalHorizon:
         doubling_months_structured: Base doubling time for structured (months).
         doubling_months_unstructured: Base doubling time for unstructured (months).
         h80_h50_ratio: Ratio of h80 to h50 (controls sigmoid steepness).
-        sw_coupling: How much SW speedup accelerates the doubling rate (0-1).
-        ceiling_structured: Logistic ceiling for structured h50 (minutes).
-        ceiling_unstructured: Logistic ceiling for unstructured h50 (minutes).
+        sw_coupling: How much SW speedup accelerates the doubling rate.
+        entropic_ceiling_structured: Hard cap from environment (minutes).
+        entropic_ceiling_unstructured: Hard cap from environment (minutes).
+        fleet: Fleet constraint for physical data wall.
     """
 
     initial_h50_structured: float = 60.0
@@ -34,8 +72,13 @@ class PhysicalHorizon:
     doubling_months_unstructured: float = 14.0
     h80_h50_ratio: float = 0.2
     sw_coupling: float = 0.3
-    ceiling_structured: float = 60 * 24 * 60.0  # 60 days
-    ceiling_unstructured: float = 18 * 60.0  # 18 hours
+    entropic_ceiling_structured: float = 60 * 24 * 60.0  # 60 days
+    entropic_ceiling_unstructured: float = 18 * 60.0  # 18 hours
+    fleet: FleetConstraint | None = None
+
+    def __post_init__(self):
+        if self.fleet is None:
+            self.fleet = FleetConstraint()
 
     def _base_slope(self, env_type: str) -> float:
         """Log-linear slope (per month) for a given environment."""
@@ -50,11 +93,11 @@ class PhysicalHorizon:
         else:
             return self.initial_h50_unstructured
 
-    def _ceiling(self, env_type: str) -> float:
+    def _entropic_ceiling(self, env_type: str) -> float:
         if env_type == "structured":
-            return self.ceiling_structured
+            return self.entropic_ceiling_structured
         else:
-            return self.ceiling_unstructured
+            return self.entropic_ceiling_unstructured
 
     def horizon_at(
         self,
@@ -62,35 +105,57 @@ class PhysicalHorizon:
         env_type: str = "unstructured",
         sw_speedup: float = 1.0,
     ) -> float:
-        """Compute h50 at time t, boosted by software speedup.
+        """Compute h50 at time t with fleet data throttle + entropic ceiling.
 
-        Software coupling accelerates the *rate* of physical AI improvement:
-        effective_slope = base_slope * (1 + sw_coupling * log(sw_speedup))
-
-        A logistic ceiling caps h50 at a maximum value per environment.
+        Growth rate = base_rate * fleet_throttle * (1 + sw_coupling * log(sw))
+        Then capped by entropic ceiling.
 
         Args:
             t_months: Months from base date (Jan 2026).
             env_type: "structured" or "unstructured".
-            sw_speedup: Software speedup factor at time t (1.0 = no speedup).
+            sw_speedup: Software speedup factor at time t.
 
         Returns:
             h50 in minutes.
         """
+        if t_months <= 0:
+            return self._initial_h50(env_type)
+
+        # Integrate growth rate over time with fleet throttle
+        n_steps = max(int(t_months), 12)
+        dt = t_months / n_steps
+        log_h50 = np.log(self._initial_h50(env_type))
         base_slope = self._base_slope(env_type)
-        # SW coupling accelerates the doubling rate itself
-        effective_slope = base_slope * (
-            1 + self.sw_coupling * np.log(max(sw_speedup, 1.0))
-        )
 
-        h50_0 = self._initial_h50(env_type)
-        L = self._ceiling(env_type)
+        # Required fleet data rate = base slope (calibrated to current)
+        # Fleet data growth at t=0 supports the base doubling rate
+        g_required = base_slope
 
-        # Logistic: L / (1 + exp(-k*(t - t0)))
-        # Constrained to match h50_0 at t=0 and initial slope
-        k = effective_slope
-        t0 = np.log(max(L / h50_0 - 1, 1e-10)) / k
-        return L / (1 + np.exp(-k * (t_months - t0)))
+        for i in range(n_steps):
+            t_i = (i + 0.5) * dt
+
+            # Fleet data throttle
+            fleet_factor = self.fleet.growth_factor(t_i)
+            if i == 0:
+                fleet_rate = 0.0
+            else:
+                t_prev = (i - 0.5) * dt
+                fleet_factor_prev = self.fleet.growth_factor(t_prev)
+                fleet_rate = np.log(fleet_factor / fleet_factor_prev) / dt
+
+            throttle = min(1.0, fleet_rate / g_required) if g_required > 0 else 1.0
+
+            # SW coupling boosts rate
+            sw_boost = 1 + self.sw_coupling * np.log(max(sw_speedup, 1.0))
+
+            # Effective growth rate this step
+            g_eff = base_slope * throttle * sw_boost
+            log_h50 += g_eff * dt
+
+        h50 = np.exp(log_h50)
+
+        # Apply entropic ceiling
+        return min(h50, self._entropic_ceiling(env_type))
 
     def success_probability(
         self,
@@ -103,15 +168,6 @@ class PhysicalHorizon:
 
         Uses the same sigmoid as METRFit: P = 1 / (1 + (d/h50)^k)
         where k = log(0.25) / log(h80/h50).
-
-        Args:
-            task_min: Task duration in minutes.
-            t_months: Months from base date.
-            env_type: "structured" or "unstructured".
-            sw_speedup: Software speedup factor at time t.
-
-        Returns:
-            Success probability [0, 1].
         """
         h50 = self.horizon_at(t_months, env_type, sw_speedup)
         h80 = h50 * self.h80_h50_ratio
@@ -129,12 +185,6 @@ class HardwareCapability:
     Models the physical capability of robots (dexterity, mobility, endurance,
     perception, strength) as a single aggregate fraction that improves over
     time via logistic growth.
-
-    Args:
-        initial_structured: Starting feasibility for structured environments.
-        initial_unstructured: Starting feasibility for unstructured envs.
-        base_rate_annual: Baseline annual improvement rate.
-        sw_design_coupling: How much log(sw_speedup) boosts improvement.
     """
 
     initial_structured: float = 0.75
@@ -148,16 +198,7 @@ class HardwareCapability:
         env_type: str = "unstructured",
         sw_speedup: float = 1.0,
     ) -> float:
-        """Fraction of physical tasks that are hardware-feasible at time t.
-
-        Args:
-            t_months: Months from base date (Jan 2026).
-            env_type: "structured" or "unstructured".
-            sw_speedup: Software speedup factor at time t.
-
-        Returns:
-            Feasibility fraction [0, 1].
-        """
+        """Fraction of physical tasks that are hardware-feasible at time t."""
         if env_type == "structured":
             initial = self.initial_structured
         else:
@@ -167,7 +208,6 @@ class HardwareCapability:
         sw_boost = self.sw_design_coupling * np.log(max(sw_speedup, 1.0))
         annual_rate = self.base_rate_annual + sw_boost
 
-        # Logistic growth toward 1.0
         odds_0 = initial / (1 - initial)
         return 1 / (1 + (1 / odds_0) * np.exp(-annual_rate * t_years))
 
@@ -178,17 +218,7 @@ def physical_automation_fraction(
     h80_h50_ratio: float,
     hw_feasibility: float,
 ) -> float:
-    """Compute probability-weighted automation fraction for physical tasks.
-
-    Args:
-        task_durations: Array of task durations in minutes.
-        h50: Physical AI h50 horizon in minutes.
-        h80_h50_ratio: Ratio of h80 to h50.
-        hw_feasibility: Fraction of tasks that are hardware-feasible.
-
-    Returns:
-        Effective automation fraction (volume-weighted).
-    """
+    """Compute probability-weighted automation fraction for physical tasks."""
     h80 = h50 * h80_h50_ratio
     k = np.log(0.25) / np.log(h80 / h50)
 
@@ -196,7 +226,6 @@ def physical_automation_fraction(
     log_ratio = np.clip(log_ratio, -50, 50)
     probs = 1 / (1 + np.exp(log_ratio))
 
-    # Hardware feasibility gates all tasks equally
     effective_probs = hw_feasibility * probs
     automated_volume = np.sum(task_durations * effective_probs)
     total_volume = np.sum(task_durations)
@@ -212,19 +241,7 @@ def sample_physical_speedup(
     horizon: PhysicalHorizon | None = None,
     hardware: HardwareCapability | None = None,
 ) -> np.ndarray:
-    """Sample physical speedup with uncertainty from SW speedup samples.
-
-    Args:
-        t_months: Months from base date (Jan 2026).
-        sw_speedups: Array of SW speedup samples (n_samples,).
-        env_type: "structured" or "unstructured".
-        task_durations: Array of sampled physical task durations (minutes).
-        horizon: PhysicalHorizon config (uses defaults if None).
-        hardware: HardwareCapability config (uses defaults if None).
-
-    Returns:
-        Array of speedup samples (n_samples,).
-    """
+    """Sample physical speedup with uncertainty from SW speedup samples."""
     if horizon is None:
         horizon = PhysicalHorizon()
     if hardware is None:
@@ -249,19 +266,7 @@ def physical_speedup(
     horizon: PhysicalHorizon | None = None,
     hardware: HardwareCapability | None = None,
 ) -> float:
-    """Compute physical task speedup at time t (deterministic).
-
-    Args:
-        t_months: Months from base date (Jan 2026).
-        sw_speedup: Software speedup factor at time t.
-        env_type: "structured" or "unstructured".
-        task_durations: Array of sampled physical task durations (minutes).
-        horizon: PhysicalHorizon config (uses defaults if None).
-        hardware: HardwareCapability config (uses defaults if None).
-
-    Returns:
-        Speedup factor (1.0 = no speedup).
-    """
+    """Compute physical task speedup at time t (deterministic)."""
     if horizon is None:
         horizon = PhysicalHorizon()
     if hardware is None:
