@@ -114,9 +114,18 @@ Side quest research conversation. Key findings:
 
 ## Key reference points
 
-- Waymo: 10M sim miles/day (100:1 sim-to-real ratio), World Model built on Genie 3 generates novel scenarios. Classified as "structured" in our 2-tier model despite operating on public roads — the domain is narrow and well-mapped.
+- Waymo: 10M sim miles/day (100:1 sim-to-real ratio), World Model built on Genie 3. Classified as "structured" — domain is narrow and well-mapped.
 - Figure Helix 02: ~4 min autonomous household task (our unstructured anchor)
 - Industrial picking (RightHand): 1,200 picks/hr at >99.5% (our structured anchor)
+- METR h50 is human-calibrated task time, NOT AI wall-clock time. AI agents are faster than humans but METR doesn't publish inference time. v1.0 had `working_time` field (total across all tasks).
+- Robot fleet for data collection: ~2K robots today, ~3 hrs useful data/robot/day
+
+## Key modeling lessons
+
+- Scaling law exponents (0.3) apply to perplexity, NOT task horizon. h50 scales much steeper with resources due to emergent capability unlocks.
+- Don't derive h50 from resources bottom-up. Instead, throttle the observed METR growth rate when resources can't keep pace (resource-gap approach).
+- Compute concentration explains the paradox of ~4x/yr frontier growth from 1.7x/yr global GPU supply. Calibrate required rate to the frontier, not the global average.
+- Entropic ceilings are properties of the environment, not the robot. Better AI doesn't help.
 
 ## Remaining work
 
