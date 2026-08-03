@@ -3,6 +3,8 @@
 ## METR Benchmark Data
 
 - METR Time Horizons: https://metr.org/time-horizons/
+  - Raw data: https://metr.org/assets/benchmark_results_1_1.yaml (updated in place by METR; local copy fetched 2026-08-03, 26 models)
+  - Limitations note (horizons >16 hr unreliable): https://metr.org/notes/2026-01-22-time-horizon-limitations/
 - Measuring AI Ability to Complete Long Tasks: https://arxiv.org/html/2503.14499v1
 
 ## Physical AI Benchmarks & State of the Art

@@ -161,3 +161,24 @@ def test_tight_energy_slows_growth():
     h50_loose = constrained_h50(t, 100.0, 4.2, 6.0, energy=e_loose)
     h50_tight = constrained_h50(t, 100.0, 4.2, 6.0, energy=e_tight)
     assert h50_tight[-1] < h50_loose[-1]
+
+
+def test_warped_months_identity_in_past():
+    from constraints import sample_warped_months
+
+    t_m = np.array([0.0, 12.0, 24.0])
+    warped = sample_warped_months(t_m, 6.0, 5, t_now_years=2.6,
+                                  base_offset_years=-0.8)
+    # All three dates are before "now" (2.6 - (-0.8) = 40.8 months)
+    assert np.allclose(warped, t_m[:, None])
+
+
+def test_warped_months_slows_future():
+    from constraints import sample_warped_months
+
+    t_m = np.array([60.0, 120.0])
+    warped = sample_warped_months(t_m, 6.0, 20, t_now_years=2.6,
+                                  base_offset_years=-0.8)
+    # Warped time never exceeds calendar time and is monotone
+    assert np.all(warped <= t_m[:, None] + 1e-9)
+    assert np.all(warped[1] > warped[0])

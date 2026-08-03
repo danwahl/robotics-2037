@@ -78,6 +78,7 @@ class METRFit:
     r_squared_80: float
     residual_std_50: float
     residual_std_80: float
+    residual_corr: float = 0.0
 
     @property
     def h80_h50_ratio(self) -> float:
@@ -95,20 +96,42 @@ class METRFit:
         return np.random.multivariate_normal(mean, self.cov_matrix, size=n)
 
     def sample_horizons(
-        self, t_months: float, n: int = 1000, ceiling: float | np.ndarray | None = None
+        self,
+        t_months: float | np.ndarray,
+        n: int = 1000,
+        ceiling: float | np.ndarray | None = None,
+        residual: bool = False,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Sample h50 and h80 at time t (in months from base_date).
 
         Args:
-            t_months: Time in months from base_date
+            t_months: Time in months from base_date. Scalar, or array of
+                length n for per-sample times (e.g. resource-warped time).
             n: Number of samples
             ceiling: Optional p50 ceiling in minutes. Can be:
                      - None: exponential (unbounded)
                      - float: fixed ceiling for all samples
                      - np.ndarray of length n: per-sample ceilings (for uncertainty)
                      p80 ceiling is derived to maintain the same ratio as exponential fit.
+            residual: If True, add model-to-model residual scatter (correlated
+                between h50 and h80) on top of parameter uncertainty.
         """
         params = self.sample_params(n)
+
+        if residual:
+            resid_cov = np.array([
+                [
+                    self.residual_std_50**2,
+                    self.residual_corr * self.residual_std_50 * self.residual_std_80,
+                ],
+                [
+                    self.residual_corr * self.residual_std_50 * self.residual_std_80,
+                    self.residual_std_80**2,
+                ],
+            ])
+            resid = np.random.multivariate_normal([0.0, 0.0], resid_cov, size=n)
+            params[:, 0] += resid[:, 0]
+            params[:, 2] += resid[:, 1]
 
         # Handle ceiling array
         if ceiling is not None and not isinstance(ceiling, np.ndarray):
@@ -145,7 +168,7 @@ class METRFit:
     def success_probability(
         self,
         task_min: float,
-        t_months: float,
+        t_months: float | np.ndarray,
         n: int = 1000,
         ceiling: float | np.ndarray | None = None,
     ) -> np.ndarray:
@@ -230,6 +253,7 @@ def fit_metr(df: pd.DataFrame) -> METRFit:
         r_squared_80=r_squared_80,
         residual_std_50=np.sqrt(mse_50),
         residual_std_80=np.sqrt(mse_80),
+        residual_corr=resid_corr,
     )
 
 

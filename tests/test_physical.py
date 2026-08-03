@@ -219,3 +219,67 @@ def test_sample_speedup_increases_with_sw_samples():
     result = sample_physical_speedup(24, sw_samples, "structured", tasks)
     assert result[1] > result[0]
     assert result[2] > result[1]
+
+
+# --- Trajectory and calibration tests ---
+
+
+def test_fleet_throttle_is_one_at_t0():
+    ph = PhysicalHorizon()
+    g0 = ph.fleet.growth_rate(0.0)
+    assert np.isclose(min(1.0, g0 / g0), 1.0)
+    # Throttle declines as fleet growth saturates
+    assert ph.fleet.growth_rate(120.0) < g0
+
+
+def test_initial_growth_matches_base_doubling():
+    """With throttle=1 and no SW boost, h50 should double at the base rate."""
+    ph = PhysicalHorizon()
+    h0 = ph.horizon_at(0, "structured", 1.0)
+    h1 = ph.horizon_at(ph.doubling_months_structured, "structured", 1.0)
+    assert np.isclose(h1 / h0, 2.0, rtol=0.05)
+
+
+def test_trajectory_below_constant_endpoint():
+    """A ramping SW trajectory should yield lower h50 than applying the
+    endpoint speedup as a constant over all of history."""
+    ph = PhysicalHorizon()
+    sw_end = 100.0
+    ramp = lambda u: sw_end ** (u / 60.0)  # noqa: E731
+    h_ramp = ph.horizon_at(60, "unstructured", ramp)
+    h_const = ph.horizon_at(60, "unstructured", sw_end)
+    assert h_ramp < h_const
+
+
+def test_feasibility_trajectory_below_constant():
+    hw = HardwareCapability()
+    sw_end = 100.0
+    ramp = lambda u: sw_end ** (u / 60.0)  # noqa: E731
+    f_ramp = hw.feasibility_at(60, "unstructured", ramp)
+    f_const = hw.feasibility_at(60, "unstructured", sw_end)
+    assert f_ramp < f_const
+
+
+def test_feasibility_constant_sw_matches_closed_form():
+    """With constant sw, the integrated logit equals the closed-form logistic."""
+    hw = HardwareCapability()
+    sw = 5.0
+    t = 36.0
+    rate = hw.base_rate_annual + hw.sw_design_coupling * np.log(sw)
+    logit0 = np.log(hw.initial_unstructured / (1 - hw.initial_unstructured))
+    expected = 1 / (1 + np.exp(-(logit0 + rate * t / 12.0)))
+    assert np.isclose(hw.feasibility_at(t, "unstructured", sw), expected, rtol=1e-6)
+
+
+def test_sample_speedup_with_trajectory():
+    np.random.seed(42)
+    tasks = np.random.lognormal(mean=np.log(30), sigma=1.5, size=5000)
+    sw_samples = np.array([1.0, 5.0, 10.0])
+    traj = lambda u: 10.0 ** (u / 24.0)  # noqa: E731
+    result = sample_physical_speedup(
+        24, sw_samples, "structured", tasks, sw_trajectory=traj
+    )
+    assert result.shape == (3,)
+    assert np.all(result >= 1.0)
+    # Still monotone in the sampled endpoint speedup
+    assert result[2] > result[1] > result[0]

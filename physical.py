@@ -9,9 +9,17 @@ Three independent limits on physical h50:
 3. Entropic ceiling (hard cap from environmental properties)
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
+
+SwTrajectory = Callable[[float], float] | float
+
+
+def _sw_at(sw: SwTrajectory, t_months: float) -> float:
+    """Evaluate a speedup trajectory (callable) or constant at time t."""
+    return sw(t_months) if callable(sw) else sw
 
 
 @dataclass
@@ -44,6 +52,14 @@ class FleetConstraint:
     def growth_factor(self, t_months: float) -> float:
         """Cumulative fleet data growth relative to t=0."""
         return self.fleet_at(t_months) / self.current_fleet
+
+    def growth_rate(self, t_months: float) -> float:
+        """Instantaneous log-growth rate d/dt ln(fleet) at time t.
+
+        Closed form for the logistic: rate * (1 - fleet/max).
+        """
+        rate = np.log(2) / self.doubling_months
+        return rate * (1 - self.fleet_at(t_months) / self.max_fleet)
 
 
 @dataclass
@@ -103,17 +119,23 @@ class PhysicalHorizon:
         self,
         t_months: float,
         env_type: str = "unstructured",
-        sw_speedup: float = 1.0,
+        sw_speedup: SwTrajectory = 1.0,
     ) -> float:
         """Compute h50 at time t with fleet data throttle + entropic ceiling.
 
         Growth rate = base_rate * fleet_throttle * (1 + sw_coupling * log(sw))
         Then capped by entropic ceiling.
 
+        The fleet throttle is calibrated so throttle=1 at t=0: the base
+        doubling times are the currently observed rates, which slow as
+        fleet data growth falls below its current rate.
+
         Args:
             t_months: Months from base date (Jan 2026).
             env_type: "structured" or "unstructured".
-            sw_speedup: Software speedup factor at time t.
+            sw_speedup: Software speedup over time — a callable mapping
+                months to speedup, or a constant. The trajectory is
+                integrated, so past growth uses past (smaller) speedups.
 
         Returns:
             h50 in minutes.
@@ -127,26 +149,17 @@ class PhysicalHorizon:
         log_h50 = np.log(self._initial_h50(env_type))
         base_slope = self._base_slope(env_type)
 
-        # Required fleet data rate = base slope (calibrated to current)
-        # Fleet data growth at t=0 supports the base doubling rate
-        g_required = base_slope
+        # Required fleet data rate: calibrated so throttle=1 at present
+        g_required = self.fleet.growth_rate(0.0)
 
         for i in range(n_steps):
             t_i = (i + 0.5) * dt
 
-            # Fleet data throttle
-            fleet_factor = self.fleet.growth_factor(t_i)
-            if i == 0:
-                fleet_rate = 0.0
-            else:
-                t_prev = (i - 0.5) * dt
-                fleet_factor_prev = self.fleet.growth_factor(t_prev)
-                fleet_rate = np.log(fleet_factor / fleet_factor_prev) / dt
-
-            throttle = min(1.0, fleet_rate / g_required) if g_required > 0 else 1.0
+            throttle = min(1.0, self.fleet.growth_rate(t_i) / g_required)
 
             # SW coupling boosts rate
-            sw_boost = 1 + self.sw_coupling * np.log(max(sw_speedup, 1.0))
+            sw = _sw_at(sw_speedup, t_i)
+            sw_boost = 1 + self.sw_coupling * np.log(max(sw, 1.0))
 
             # Effective growth rate this step
             g_eff = base_slope * throttle * sw_boost
@@ -162,7 +175,7 @@ class PhysicalHorizon:
         task_min: float,
         t_months: float,
         env_type: str = "unstructured",
-        sw_speedup: float = 1.0,
+        sw_speedup: SwTrajectory = 1.0,
     ) -> float:
         """Success probability for a physical task of given duration.
 
@@ -196,20 +209,32 @@ class HardwareCapability:
         self,
         t_months: float,
         env_type: str = "unstructured",
-        sw_speedup: float = 1.0,
+        sw_speedup: SwTrajectory = 1.0,
     ) -> float:
-        """Fraction of physical tasks that are hardware-feasible at time t."""
+        """Fraction of physical tasks that are hardware-feasible at time t.
+
+        Logistic growth with a time-varying rate: the SW design boost is
+        integrated over the trajectory, so past growth uses past speedups.
+        Solves dF/dt = r(t) F (1-F) via logit(F(t)) = logit(F0) + int r dt.
+        """
         if env_type == "structured":
             initial = self.initial_structured
         else:
             initial = self.initial_unstructured
 
-        t_years = t_months / 12.0
-        sw_boost = self.sw_design_coupling * np.log(max(sw_speedup, 1.0))
-        annual_rate = self.base_rate_annual + sw_boost
+        logit = np.log(initial / (1 - initial))
 
-        odds_0 = initial / (1 - initial)
-        return 1 / (1 + (1 / odds_0) * np.exp(-annual_rate * t_years))
+        if t_months > 0:
+            n_steps = max(int(t_months), 12)
+            dt = t_months / n_steps
+            for i in range(n_steps):
+                t_i = (i + 0.5) * dt
+                sw = _sw_at(sw_speedup, t_i)
+                sw_boost = self.sw_design_coupling * np.log(max(sw, 1.0))
+                annual_rate = self.base_rate_annual + sw_boost
+                logit += annual_rate * dt / 12.0
+
+        return 1 / (1 + np.exp(-logit))
 
 
 def physical_automation_fraction(
@@ -233,6 +258,21 @@ def physical_automation_fraction(
     return automated_volume / total_volume
 
 
+def _scaled_trajectory(
+    trajectory: Callable[[float], float], t_months: float, sw_target: float
+) -> SwTrajectory:
+    """Scale a median SW trajectory so it passes through sw_target at t.
+
+    Scales in log space: traj_i(u) = traj(u)^alpha with
+    alpha = log(sw_target) / log(traj(t)), preserving the ramp shape.
+    """
+    sw_med = max(trajectory(t_months), 1.0)
+    if sw_med <= 1.0 or sw_target <= 1.0:
+        return max(sw_target, 1.0)
+    alpha = np.log(sw_target) / np.log(sw_med)
+    return lambda u: max(trajectory(u), 1.0) ** alpha
+
+
 def sample_physical_speedup(
     t_months: float,
     sw_speedups: np.ndarray,
@@ -240,8 +280,17 @@ def sample_physical_speedup(
     task_durations: np.ndarray,
     horizon: PhysicalHorizon | None = None,
     hardware: HardwareCapability | None = None,
+    sw_trajectory: Callable[[float], float] | None = None,
 ) -> np.ndarray:
-    """Sample physical speedup with uncertainty from SW speedup samples."""
+    """Sample physical speedup with uncertainty from SW speedup samples.
+
+    Args:
+        sw_speedups: Sampled SW speedup values at time t.
+        sw_trajectory: Median SW speedup path (months -> speedup). Each
+            sample's path is the trajectory log-scaled to pass through
+            that sample's speedup at t. If None, each sample's speedup
+            is treated as constant over history (overstates past boost).
+    """
     if horizon is None:
         horizon = PhysicalHorizon()
     if hardware is None:
@@ -249,8 +298,12 @@ def sample_physical_speedup(
 
     speedups = np.empty(len(sw_speedups))
     for i, sw in enumerate(sw_speedups):
-        h50 = horizon.horizon_at(t_months, env_type, sw)
-        hw_frac = hardware.feasibility_at(t_months, env_type, sw)
+        if sw_trajectory is not None:
+            sw_path: SwTrajectory = _scaled_trajectory(sw_trajectory, t_months, sw)
+        else:
+            sw_path = sw
+        h50 = horizon.horizon_at(t_months, env_type, sw_path)
+        hw_frac = hardware.feasibility_at(t_months, env_type, sw_path)
         frac = physical_automation_fraction(
             task_durations, h50, horizon.h80_h50_ratio, hw_frac
         )
@@ -260,7 +313,7 @@ def sample_physical_speedup(
 
 def physical_speedup(
     t_months: float,
-    sw_speedup: float,
+    sw_speedup: SwTrajectory,
     env_type: str,
     task_durations: np.ndarray,
     horizon: PhysicalHorizon | None = None,

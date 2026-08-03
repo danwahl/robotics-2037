@@ -20,13 +20,13 @@ Quantitative forecasting model for AI + robotics capabilities, inspired by "AI 2
 
 ## Project structure
 
-- `metr.py` — METR model (unified p50/p80 logistic fit with optional ceiling)
+- `metr.py` — METR model (unified p50/p80 log-linear fit; optional ceiling, per-sample warped time, residual scatter)
 - `physical.py` — physical AI model (physical horizon + hardware capability + combined speedup)
-- `constraints.py` — resource constraint models (energy, compute, algo, data, fleet)
+- `constraints.py` — resource constraint models (energy, compute, algo, data, fleet) + resource time-warp sampling
 - `main.ipynb` — interactive analysis notebook
 - `data/benchmark_results_1_0.yaml` — METR v1.0 benchmark data (original)
-- `data/benchmark_results_1_1.yaml` — METR v1.1 benchmark data (current, from https://metr.org/time-horizons/)
-- `tests/test_metr.py` — 23 tests for METR model
+- `data/benchmark_results_1_1.yaml` — METR v1.1 benchmark data (current; METR updates this file in place — local copy fetched 2026-08-03, 26 models through Apr 2026). Note: METR flags horizons >16 hr as unreliable and excludes them from its own trend fit; our fit currently includes them.
+- `tests/test_metr.py` — tests for METR model
 - `tests/test_physical.py` — tests for physical model
 - `tests/test_constraints.py` — tests for constraint models
 - `SOURCES.md` — bibliography of data sources and references
@@ -37,8 +37,8 @@ Quantitative forecasting model for AI + robotics capabilities, inspired by "AI 2
 
 Log-linear fit to METR benchmark data (SOTA models, 2023+):
 - `success_probability(task_min, t_months)` uses sigmoid: `P = 1/(1 + (d/h50)^k)`
-- `k` derived from h80/h50 ratio; 4x4 covariance matrix for uncertainty
-- Optional logistic ceiling (scalar or distribution); p80 ceiling maintains ratio
+- `k` derived from h80/h50 ratio; 4x4 covariance matrix for uncertainty; optional residual scatter (`residual=True`) adds model-to-model noise on top of parameter uncertainty
+- Resource constraints enter via warped time: `sample_horizons` accepts per-sample effective months from `sample_warped_months` (optional logistic ceiling also still supported)
 - Software speedup = `1/(1 - frac_automated)` where frac is probability-weighted over lognormal task distribution
 
 ### Resource constraints (constraints.py)
@@ -48,14 +48,16 @@ Replaces hand-wavy ceilings with principled resource-gap model:
 - Data constraint: human data (logistic cap at 3x) + synthetic (2% efficiency × compute)
 - Calibrated so throttle=1.0 at present; constraints bite as concentration caps out
 - Compute concentration: frontier labs grab increasing share of global GPU supply (~2% → ~15% cap)
+- Applied as a time-warp: `sample_warped_months` integrates the throttle into effective months τ(t), and the METR fit is evaluated at τ (`h50 = exp(intercept + slope·τ)`) — slowdown applied exactly once, no separate ceiling needed
+- Sampled uncertainty: energy max, concentration max, algo decay, human data max, synth efficiency
 
 ### Physical AI node (physical.py)
 
 Three independent limits on physical h50:
 
-**SW cognitive throttle** (inherited): physical horizon growth couples to SW speedup (sw_coupling=0.3)
+**SW cognitive throttle** (inherited): physical horizon growth couples to SW speedup (sw_coupling=0.3). SW speedup is passed as a *trajectory* (callable over months) and integrated, so past growth uses past (smaller) speedups — never apply the endpoint speedup retroactively over history.
 
-**Physical data wall** (fleet-limited): robots collect training data in real-time (~3 hrs/robot/day). Fleet grows logistically from ~2K to ~2M robots, doubling every ~18 months. When fleet growth slows, physical data rate drops below required rate.
+**Physical data wall** (fleet-limited): robots collect training data in real-time (~3 hrs/robot/day). Fleet grows logistically from ~2K to ~2M robots, doubling every ~18 months. Throttle = `min(1, fleet_rate(t) / fleet_rate(0))` — calibrated to 1.0 at present (base doubling times are observed rates), declining as fleet growth saturates.
 
 **Entropic ceiling** (physics-limited): hard caps on max autonomous task duration that don't improve with better AI — they're properties of the environment, not the robot:
 - Structured: 60 days (factory maintenance/supply cycles)
@@ -126,6 +128,8 @@ Side quest research conversation. Key findings:
 - Don't derive h50 from resources bottom-up. Instead, throttle the observed METR growth rate when resources can't keep pace (resource-gap approach).
 - Compute concentration explains the paradox of ~4x/yr frontier growth from 1.7x/yr global GPU supply. Calibrate required rate to the frontier, not the global average.
 - Entropic ceilings are properties of the environment, not the robot. Better AI doesn't help.
+- Feed time-varying inputs (SW speedup) into integrations as trajectories, not endpoint constants — applying the endpoint value over the whole history retroactively inflates growth by orders of magnitude.
+- Apply resource constraints as a time-warp on the fitted trend, not as a logistic asymptote fed from the constrained trajectory itself — the latter double-counts the slowdown.
 
 ## Remaining work
 
